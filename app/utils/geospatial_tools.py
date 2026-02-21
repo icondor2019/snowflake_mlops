@@ -2,6 +2,7 @@ import h3
 from geopy.distance import geodesic
 from loguru import logger
 import traceback
+import numpy as np
 
 
 class GeoSpatialTools:
@@ -51,3 +52,27 @@ class GeoSpatialTools:
                 nearest_hex = min(candidates, key=lambda h: h3.grid_distance(current_hex, h))
                 df.at[idx, f'nn_h8_{parent_name}'] = nearest_hex
         return df
+
+    def haversine_vectorized(self, base_coord, coords_array):
+        lat1, lon1 = np.radians(base_coord)
+        
+        lat2 = np.radians(coords_array[:, 0])
+        lon2 = np.radians(coords_array[:, 1])
+
+        dlat = lat2 - lat1
+        dlon = lon2 - lon1
+
+        a = np.sin(dlat/2)**2 + np.cos(lat1)*np.cos(lat2)*np.sin(dlon/2)**2
+        c = 2 * np.arcsin(np.sqrt(a))
+
+        r = 6371  # km
+        return r * c
+
+    def hex_distance_from_coordinates_vectorized(self, hex_center, coor_list):
+        if not coor_list:
+            return 999999
+
+        coords_array = np.array(coor_list)
+        distances = self.haversine_vectorized(hex_center, coords_array)
+
+        return round(distances.min(), 2)
