@@ -48,7 +48,8 @@ class SnowflakeMLOpsManager:
         model_name: name for the model in registry
         version_name: version name (auto-generated if None)
         save_metrics_to_registry: if True, saves metrics to model version for comparison
-        tags: dict of tags to apply to the model (e.g., {"stage": "challenger"})
+        tags: dict of tags to apply to the model (e.g., {"stage": "challenger"}). 
+            TAGS should be created before calling this function, and will be applied to the model version if log_model=True.
         """
 
         with self.exp.start_run(run_name):
