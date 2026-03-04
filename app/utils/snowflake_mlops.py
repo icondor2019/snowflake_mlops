@@ -1,6 +1,7 @@
 from snowflake.ml.experiment import ExperimentTracking
 from snowflake.ml.model.model_signature import infer_signature
 from snowflake.ml.registry import Registry
+from snowflake.ml.feature_store import FeatureStore
 from typing import Optional, Dict, Any, List
 
 
@@ -219,3 +220,34 @@ class SnowflakeMLOpsManager:
         if tags.get(champion_tag_name) == champion_tag_value:
             return model_ref.default.version_name
         return None
+
+    def get_feature_store_view(self, 
+                                  feature_vw_name: str, 
+                                  version: str = "v1",
+                                  warehouse: str = 'ai_project_wh',
+                                  limit: int = None):
+        """Get feature view data as pandas dataframe.
+        
+        Args:
+            feature_vw_name: Feature view name
+            version: Feature view version
+            limit: Maximum number of rows to return
+            
+        Returns:
+            Pandas DataFrame with feature data
+        """
+
+        fs = FeatureStore(
+            session=self.session, 
+            database="AI_PROJECT", 
+            name="FEATURES",
+            default_warehouse=warehouse
+        )
+        
+        fv = fs.get_feature_view(name=feature_vw_name, version=version)
+        if limit:
+            df = fv.feature_df.limit(limit).to_pandas()
+        else:
+            df = fv.feature_df.to_pandas()
+
+        return df
