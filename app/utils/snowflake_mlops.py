@@ -251,3 +251,85 @@ class SnowflakeMLOpsManager:
             df = fv.feature_df.to_pandas()
 
         return df
+
+    def get_model_version(self, model_name: str, version_name: str = None):
+        """Get a specific model version object from registry.
+        
+        Args:
+            model_name: Name of the model
+            version_name: Specific version name. If None, returns default version
+            
+        Returns:
+            ModelVersion object
+        """
+        model_ref = self.registry.get_model(model_name)
+        if version_name:
+            return model_ref.version(version_name)
+        return model_ref.default
+
+    def get_model_params(self, model_name: str, version_name: str = None) -> Dict[str, Any]:
+        """Get hyperparameters from a trained model version.
+        
+        Args:
+            model_name: Name of the model in registry
+            version_name: Specific version name. If None, uses champion version
+            
+        Returns:
+            Dictionary of hyperparameters logged during training
+        """
+        model_version = self.get_model_version(model_name, version_name)
+        
+        # Get metadata/properties which should include hyperparameters
+        props = model_version.model_meta
+        
+        return props if props else {}
+
+    def create_tag(self, model_name: str, tag_name: str, tag_value: str) -> Dict[str, Any]:
+        """Create or update a tag on a model in the registry.
+        
+        Args:
+            model_name: Name of the model
+            tag_name: Tag name/key
+            tag_value: Tag value
+            
+        Returns:
+            Dictionary with tag creation status
+        """
+        model_ref = self.registry.get_model(model_name)
+        model_ref.set_tag(tag_name, tag_value)
+        
+        return {
+            "status": "created",
+            "model_name": model_name,
+            "tag_name": tag_name,
+            "tag_value": tag_value,
+        }
+
+    def log_model_metadata(self, 
+                          model_name: str, 
+                          version_name: str, 
+                          metadata: Dict[str, Any]) -> Dict[str, Any]:
+        """Log custom metadata to a model version (e.g., snapshot_date, data_version).
+        
+        Args:
+            model_name: Name of the model
+            version_name: Version to tag with metadata
+            metadata: Dictionary of metadata key-value pairs to log
+            
+        Returns:
+            Dictionary with metadata logging status
+        """
+        model_ref = self.registry.get_model(model_name)
+        model_version = model_ref.version(version_name)
+        
+        # Log metadata as tags with 'meta_' prefix
+        for key, value in metadata.items():
+            tag_key = f"meta_{key}"
+            model_version.set_tag(tag_key, str(value))
+        
+        return {
+            "status": "logged",
+            "model_name": model_name,
+            "version_name": version_name,
+            "metadata_keys": list(metadata.keys()),
+        }
