@@ -10,8 +10,8 @@ import os
 from loguru import logger
 
 from utils.snowflake_mlops import SnowflakeMLOpsManager
-from app.requests_models.tr_pipeline_request import TrainingPipelineRequest
-from app.responses.tr_pipeline_response import TrainingPipelineResponse, ModelComparisonResult
+from requests_models.tr_pipeline_request import TrainingPipelineRequest
+from responses.tr_pipeline_response import TrainingPipelineResponse, ModelComparisonResult
 
 
 class TrainingPipelineException(Exception):
@@ -31,15 +31,6 @@ class TrainingPipeline:
     5. Register model with metrics and metadata
     6. Promote to champion if better
     """
-    
-    # Default hyperparameters for Random Forest
-    DEFAULT_RF_PARAMS = {
-        'n_estimators': 100,
-        'max_depth': 10,
-        'min_samples_split': 5,
-        'min_samples_leaf': 2,
-        'random_state': 42,
-    }
     
     # Hyperparameter tuning grid
     RF_TUNING_GRID = {
@@ -73,7 +64,6 @@ class TrainingPipeline:
         # Initialize Snowflake MLOps manager
         self.mlops_manager = SnowflakeMLOpsManager(
             session=session,
-            experiment_name=experiment_name,
             database=database,
             schema=self.schema_models
         )
@@ -87,6 +77,8 @@ class TrainingPipeline:
         self._trained_model: Optional[Any] = None
         self._model_metrics: Optional[Dict[str, float]] = None
         self._comparison_result: Optional[Dict[str, Any]] = None
+        self.champ_model: Optional[Any] = None
+        self.champion_params: Optional[Dict[str, Any]] = None
         
         logger.info(f"TrainingPipeline initialized with experiment: {experiment_name}")
     
@@ -130,47 +122,24 @@ class TrainingPipeline:
             model_name: Name of the model in registry
             
         Returns:
-            Dictionary with champion model info and parameters
+            model version
         """
-        logger.info(f"Retrieving champion model: {model_name}")
-        
+        logger.debug(f"Retrieving champion model: {model_name}")
+
         try:
             # Get champion version
-            champion_version = self.mlops_manager.get_champion_version(
+            champion_version = self.mlops_manager.get_model_by_version(
                 model_name=model_name,
-                champion_tag_name="stage",
-                champion_tag_value="champion"
+                version="champion"
             )
-            
-            if not champion_version:
-                logger.warning(f"No champion found for {model_name}, will use default parameters")
-                return {
-                    "version_name": None,
-                    "parameters": self.DEFAULT_RF_PARAMS,
-                    "is_default": True,
-                }
-            
-            # Get champion model parameters
-            champion_params = self.mlops_manager.get_model_params(
-                model_name=model_name,
-                version_name=champion_version
-            )
-            
-            logger.info(f"Retrieved champion version {champion_version}")
-            
-            return {
-                "version_name": champion_version,
-                "parameters": champion_params or self.DEFAULT_RF_PARAMS,
-                "is_default": False,
-            }
-            
+            logger.debug(f"Retrieved champion version {champion_version}")
+
+            self.champ_model = champion_version.load()
+            self.champion_params = self.champ_model.get_params()
+            logger.info(f"Champion model parameters: {self.champion_params}")
         except Exception as e:
             logger.warning(f"Failed to retrieve champion model: {str(e)}, using defaults")
-            return {
-                "version_name": None,
-                "parameters": self.DEFAULT_RF_PARAMS,
-                "is_default": True,
-            }
+        return
     
     def prepare_data(self,
                     request: TrainingPipelineRequest) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
@@ -219,8 +188,7 @@ class TrainingPipeline:
             raise TrainingPipelineException(f"Failed to prepare data: {str(e)}")
     
     def train_model(self,
-                   request: TrainingPipelineRequest,
-                   champion_params: Dict[str, Any]) -> Any:
+                   request: TrainingPipelineRequest) -> Any:
         """
         Train model with specified parameters or with hyperparameter tuning.
         
@@ -235,16 +203,18 @@ class TrainingPipeline:
         
         if self._X_train is None:
             raise TrainingPipelineException("Data not prepared. Call prepare_data() first.")
-        
+        if self.champion_params is None:
+            logger.warning("Champion parameters not available, using defaults or provided hyperparameters")
+
         try:
             # Use provided hyperparameters or champion parameters
             if request.hyperparameters:
                 params = request.hyperparameters
                 logger.info(f"Using provided hyperparameters: {params}")
             else:
-                params = champion_params
+                params = self.champion_params
                 logger.info(f"Using champion hyperparameters: {params}")
-            
+
             if request.enable_hyperparameter_tuning:
                 # Perform hyperparameter tuning
                 logger.info("Performing hyperparameter tuning with GridSearchCV")
