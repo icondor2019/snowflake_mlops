@@ -3,10 +3,11 @@ from snowflake.ml.model.model_signature import infer_signature
 from snowflake.ml.registry import Registry
 from snowflake.ml.feature_store import FeatureStore
 from typing import Optional, Dict, Any, List
+from loguru import logger
 
 
 class SnowflakeMLOpsManager:
-    def __init__(self, session, experiment_name: str, database: str = None, schema: str = None):
+    def __init__(self, session, database: str = None, schema: str = None):
         """
         session: Snowpark session
         experiment_name: nombre del experimento
@@ -16,8 +17,6 @@ class SnowflakeMLOpsManager:
         self.session = session
         self.database = database
         self.schema = schema
-        self.exp = ExperimentTracking(session=session)
-        self.exp.set_experiment(experiment_name)
         self.registry = Registry(
             session=session,
             database_name=database,
@@ -38,7 +37,8 @@ class SnowflakeMLOpsManager:
         model_name: str = None,
         version_name: str = None,
         save_metrics_to_registry: bool = True,
-        tags: Dict[str, str] = None,
+        alias: str = None,
+        experiment_name: str = None
     ):
         """
         Execute the entire ML workflow and log everything in one go.
@@ -52,6 +52,10 @@ class SnowflakeMLOpsManager:
         tags: dict of tags to apply to the model (e.g., {"stage": "challenger"}). 
             TAGS should be created before calling this function, and will be applied to the model version if log_model=True.
         """
+        self.exp = ExperimentTracking(session=self.session)
+        self.exp.set_experiment(self.experiment_name)
+        if experiment_name is None:
+            experiment_name = f"experiment_{model_name}_{datetime.now().strftime('%Y-%m-%d')}"
 
         with self.exp.start_run(run_name):
             self.exp.log_params(params)
@@ -67,159 +71,29 @@ class SnowflakeMLOpsManager:
                 sig = infer_signature(X_train, y_train)
                 mv = self.exp.log_model(
                     model,
-                    model_name=model_name or "model",
+                    model_name=model_name,
                     version_name=version_name,
                     signatures={"predict": sig},
                     metrics=metrics if save_metrics_to_registry else None,
                 )
+                reg_version = mv.version_name
+                reg_model_name = mv.model_name
+                if alias:
+                    self.session.sql(f"""
+                                    ALTER MODEL AI_PROJECT.MLOPS.{reg_model_name} VERSION {reg_version} SET ALIAS = {alias}
+                                """).collect()
+            return metrics 
 
-                if tags and mv:
-                    model_ref = self.registry.get_model(model_name or "model")
-                    for tag_name, tag_value in tags.items():
-                        model_ref.set_tag(tag_name, tag_value)
-
-            return metrics
-
-    def compare_with_champion(
+    def get_model_by_version(
         self,
         model_name: str,
-        challenger_version: str,
-        metric_name: str,
-        champion_tag_name: str = "stage",
-        champion_tag_value: str = "champion",
-        higher_is_better: bool = True,
-    ) -> Dict[str, Any]:
-        """
-        Compare a challenger model version against the champion.
-        
-        Args:
-            model_name: name of the model in registry
-            challenger_version: version name of the challenger model
-            metric_name: metric to compare (e.g., "accuracy", "f1_score")
-            champion_tag_name: tag name used to identify champion
-            champion_tag_value: tag value for champion
-            higher_is_better: True if higher metric is better (accuracy), 
-                              False if lower is better (rmse, mae)
-        
-        Returns:
-            dict with comparison results and recommendation
-        """
-        model_ref = self.registry.get_model(model_name)
-        
-        champion_version = None
-        for version in model_ref.versions():
-            version_name = version.version_name
-            try:
-                mv = model_ref.version(version_name)
-                metrics = mv.show_metrics()
-                if metrics.get("_tags", {}).get(champion_tag_name) == champion_tag_value:
-                    champion_version = version_name
-                    break
-            except:
-                pass
-        
-        if not champion_version:
-            tags = model_ref.show_tags()
-            if tags.get(champion_tag_name) == champion_tag_value:
-                champion_version = model_ref.default.version_name
-        
-        if not champion_version:
-            return {
-                "status": "no_champion",
-                "message": f"No champion found with tag {champion_tag_name}={champion_tag_value}",
-                "recommendation": "promote_challenger",
-                "challenger_version": challenger_version,
-            }
-        
-        champion_mv = model_ref.version(champion_version)
-        challenger_mv = model_ref.version(challenger_version)
-        
-        champion_metrics = champion_mv.show_metrics()
-        challenger_metrics = challenger_mv.show_metrics()
-        
-        champion_score = champion_metrics.get(metric_name)
-        challenger_score = challenger_metrics.get(metric_name)
-        
-        if champion_score is None or challenger_score is None:
-            return {
-                "status": "error",
-                "message": f"Metric '{metric_name}' not found in one or both versions",
-                "champion_metrics": champion_metrics,
-                "challenger_metrics": challenger_metrics,
-            }
-        
-        if higher_is_better:
-            is_better = challenger_score > champion_score
-            improvement = challenger_score - champion_score
-            improvement_pct = (improvement / champion_score * 100) if champion_score != 0 else 0
-        else:
-            is_better = challenger_score < champion_score
-            improvement = champion_score - challenger_score
-            improvement_pct = (improvement / champion_score * 100) if champion_score != 0 else 0
-        
-        return {
-            "status": "compared",
-            "champion_version": champion_version,
-            "challenger_version": challenger_version,
-            "metric_name": metric_name,
-            "champion_score": champion_score,
-            "challenger_score": challenger_score,
-            "improvement": improvement,
-            "improvement_pct": round(improvement_pct, 2),
-            "challenger_is_better": is_better,
-            "recommendation": "promote_challenger" if is_better else "keep_champion",
-            "champion_metrics": champion_metrics,
-            "challenger_metrics": challenger_metrics,
-        }
-
-    def promote_to_champion(
-        self,
-        model_name: str,
-        version_name: str,
-        champion_tag_name: str = "stage",
-        champion_tag_value: str = "champion",
-        set_as_default: bool = True,
-    ) -> Dict[str, Any]:
-        """
-        Promote a model version to champion status.
-        
-        Args:
-            model_name: name of the model
-            version_name: version to promote
-            champion_tag_name: tag name for champion status
-            champion_tag_value: tag value for champion
-            set_as_default: also set this version as default
-        
-        Returns:
-            dict with promotion result
-        """
-        model_ref = self.registry.get_model(model_name)
-        
-        model_ref.set_tag(champion_tag_name, champion_tag_value)
-        
-        if set_as_default:
-            model_ref.default = version_name
-        
-        return {
-            "status": "promoted",
-            "model_name": model_name,
-            "version_name": version_name,
-            "tag": f"{champion_tag_name}={champion_tag_value}",
-            "is_default": set_as_default,
-        }
-
-    def get_champion_version(
-        self,
-        model_name: str,
-        champion_tag_name: str = "stage",
-        champion_tag_value: str = "champion",
+        version: str = "champion",
     ) -> Optional[str]:
-        """Get the current champion version name."""
+        """Get a specific model version object from registry by name and version or alias."""
         model_ref = self.registry.get_model(model_name)
-        tags = model_ref.show_tags()
-        if tags.get(champion_tag_name) == champion_tag_value:
-            return model_ref.default.version_name
-        return None
+        mv = model_ref.version("champion")
+        logger.debug(f"Champion model version: {mv.version_name}")
+        return mv
 
     def get_feature_store_view(self, 
                                   feature_vw_name: str, 
@@ -251,38 +125,6 @@ class SnowflakeMLOpsManager:
             df = fv.feature_df.to_pandas()
 
         return df
-
-    def get_model_version(self, model_name: str, version_name: str = None):
-        """Get a specific model version object from registry.
-        
-        Args:
-            model_name: Name of the model
-            version_name: Specific version name. If None, returns default version
-            
-        Returns:
-            ModelVersion object
-        """
-        model_ref = self.registry.get_model(model_name)
-        if version_name:
-            return model_ref.version(version_name)
-        return model_ref.default
-
-    def get_model_params(self, model_name: str, version_name: str = None) -> Dict[str, Any]:
-        """Get hyperparameters from a trained model version.
-        
-        Args:
-            model_name: Name of the model in registry
-            version_name: Specific version name. If None, uses champion version
-            
-        Returns:
-            Dictionary of hyperparameters logged during training
-        """
-        model_version = self.get_model_version(model_name, version_name)
-        
-        # Get metadata/properties which should include hyperparameters
-        props = model_version.model_meta
-        
-        return props if props else {}
 
     def create_tag(self, model_name: str, tag_name: str, tag_value: str) -> Dict[str, Any]:
         """Create or update a tag on a model in the registry.
