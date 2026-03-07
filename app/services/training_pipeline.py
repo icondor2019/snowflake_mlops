@@ -2,21 +2,24 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 from typing import Dict, List, Any, Optional, Tuple
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import train_test_split, GridSearchCV, RandomizedSearchCV
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, mean_squared_error, mean_absolute_error
+from sklearn.metrics import mean_squared_error, mean_absolute_error
 import time
 import os
 from loguru import logger
 
 from utils.snowflake_mlops import SnowflakeMLOpsManager
-from requests_models.tr_pipeline_request import TrainingPipelineRequest
+from requests_models.tr_pipeline_request import TrainingPipelineRequest, RandomForestTrainingParams
 from responses.tr_pipeline_response import TrainingPipelineResponse, ModelComparisonResult
 
 
 class TrainingPipelineException(Exception):
     """Custom exception for training pipeline errors."""
-    pass
+    
+    def __init__(self, message: str):
+        super().__init__(message)
+        logger.error(f"TrainingPipeline Error: {message}")
 
 
 class TrainingPipeline:
@@ -79,6 +82,10 @@ class TrainingPipeline:
         self._comparison_result: Optional[Dict[str, Any]] = None
         self.champ_model: Optional[Any] = None
         self.champion_params: Optional[Dict[str, Any]] = None
+        self.informational_columns: List[str] = [
+            'REFRESHED_AT', 'HEX_ID', 'LAT', 'LON', 'DIST_TO_SUPERMARKET',
+       'DIST_TO_HOSPITAL', 'DIST_TO_SCHOOL', 'DIST_TO_PARK',
+       'DIST_TO_RESTAURANT', 'DIST_TO_BANK', 'DIST_TO_CAFE', 'DIST_TO_FUEL'] # TODO: handle this from view
         
         logger.info(f"TrainingPipeline initialized with experiment: {experiment_name}")
     
@@ -99,13 +106,19 @@ class TrainingPipeline:
             # Load data from feature view using MLOps manager
             self._features_df = self.mlops_manager.get_feature_store_view(
                 feature_vw_name=request.feature_view_name,
-                version="v1"
+                version="v1" # TODO: make this dynamic
             )
             
             if self._features_df is None or len(self._features_df) == 0:
                 raise TrainingPipelineException(
                     f"No features found in {request.feature_view_name}"
                 )
+            
+            # drop informational columns
+            self._features_df = self._features_df.drop(columns=self.informational_columns)
+            
+            # Convert columns to lowercase
+            self._features_df.columns = self._features_df.columns.str.lower()
             
             logger.info(f"Loaded {len(self._features_df)} samples with {len(self._features_df.columns)} features")
             
@@ -161,13 +174,14 @@ class TrainingPipeline:
             # Separate features and target
             target_col = request.target_column.lower()
             if target_col not in self._features_df.columns:
+                logger.debug(f"available columns: {self._features_df.columns}")
                 raise TrainingPipelineException(
                     f"Target column '{request.target_column}' not found in features"
                 )
-            
+
             X = self._features_df.drop(columns=[target_col])
             y = self._features_df[target_col]
-            
+
             # Train-test split
             X_train, X_test, y_train, y_test = train_test_split(
                 X, y,
@@ -200,7 +214,8 @@ class TrainingPipeline:
             Trained model object
         """
         logger.info(f"Starting model training (enable_tuning={request.enable_hyperparameter_tuning})")
-        
+        self.champion_params = {'alpha': 0.9, 'ccp_alpha': 0.0, 'criterion': 'friedman_mse', 'init': None, 'learning_rate': 0.1, 'loss': 'squared_error', 'max_depth': 20, 'max_features': None, 'max_leaf_nodes': None, 'min_impurity_decrease': 0.0, 'min_samples_leaf': 2, 'min_samples_split': 5, 'min_weight_fraction_leaf': 0.0, 'n_estimators': 150, 'n_iter_no_change': None, 'random_state': 42, 'subsample': 1.0, 'tol': 0.0001, 'validation_fraction': 0.1, 'verbose': 0, 'warm_start': False}
+        self.champion_params = RandomForestTrainingParams(**self.champion_params)
         if self._X_train is None:
             raise TrainingPipelineException("Data not prepared. Call prepare_data() first.")
         if self.champion_params is None:
@@ -212,7 +227,7 @@ class TrainingPipeline:
                 params = request.hyperparameters
                 logger.info(f"Using provided hyperparameters: {params}")
             else:
-                params = self.champion_params
+                params = self.champion_params.dict()
                 logger.info(f"Using champion hyperparameters: {params}")
 
             if request.enable_hyperparameter_tuning:
@@ -242,7 +257,7 @@ class TrainingPipeline:
                 
             else:
                 # Train with fixed parameters
-                self._trained_model = RandomForestClassifier(**params)
+                self._trained_model = RandomForestRegressor(**params)
                 self._trained_model.fit(self._X_train, self._y_train)
                 logger.info("Model trained with champion/provided parameters")
             
