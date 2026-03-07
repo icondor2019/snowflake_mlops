@@ -3,6 +3,14 @@ from typing import Optional, Dict, Any, List
 from datetime import datetime
 
 
+class RandomForestTrainingParams(BaseModel):
+    """Hyperparameter options for tuning grid."""
+    n_estimators: int = Field(..., ge=1)
+    max_depth: int = Field(..., ge=1)
+    min_samples_split: int = Field(..., ge=2)
+    min_samples_leaf: int = Field(..., ge=1)
+
+
 class TrainingPipelineRequest(BaseModel):
     """Request model for training pipeline execution."""
     
