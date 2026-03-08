@@ -4,6 +4,7 @@ from snowflake.ml.registry import Registry
 from snowflake.ml.feature_store import FeatureStore
 from typing import Optional, Dict, Any, List
 from loguru import logger
+from datetime import datetime
 
 
 class SnowflakeMLOpsManager:
@@ -25,7 +26,6 @@ class SnowflakeMLOpsManager:
 
     def log_run(
         self,
-        run_name: str,
         model,
         X_train,
         y_train,
@@ -36,10 +36,10 @@ class SnowflakeMLOpsManager:
         log_model: bool = False,
         model_name: str = None,
         version_name: str = None,
-        save_metrics_to_registry: bool = True,
         alias: str = None,
-        experiment_name: str = None
-    ):
+        experiment_name: str = None,
+        run_name: str = None
+        ):
         """
         Execute the entire ML workflow and log everything in one go.
 
@@ -49,13 +49,17 @@ class SnowflakeMLOpsManager:
         model_name: name for the model in registry
         version_name: version name (auto-generated if None)
         save_metrics_to_registry: if True, saves metrics to model version for comparison
-        tags: dict of tags to apply to the model (e.g., {"stage": "challenger"}). 
-            TAGS should be created before calling this function, and will be applied to the model version if log_model=True.
+        alias: alias to apply to the model version, only to promote champions
         """
         self.exp = ExperimentTracking(session=self.session)
-        self.exp.set_experiment(self.experiment_name)
+        run_context = f"{model_name}_{datetime.now().strftime('%Y_%m_%d_%H_%M')}"
+
         if experiment_name is None:
-            experiment_name = f"experiment_{model_name}_{datetime.now().strftime('%Y-%m-%d')}"
+            experiment_name = f"experiment_{run_context}"
+        self.exp.set_experiment(experiment_name)
+
+        if run_name is None:
+            run_name = f"run_{run_context}"
 
         with self.exp.start_run(run_name):
             self.exp.log_params(params)
@@ -74,21 +78,22 @@ class SnowflakeMLOpsManager:
                     model_name=model_name,
                     version_name=version_name,
                     signatures={"predict": sig},
-                    metrics=metrics if save_metrics_to_registry else None,
+                    metrics=metrics,
                 )
                 reg_version = mv.version_name
                 reg_model_name = mv.model_name
+                logger.debug(f"Registeed_model: name: {reg_model_name}, version:{reg_version}")
                 if alias:
                     self.session.sql(f"""
                                     ALTER MODEL AI_PROJECT.MLOPS.{reg_model_name} VERSION {reg_version} SET ALIAS = {alias}
                                 """).collect()
-            return metrics 
+            return mv
 
     def get_model_by_version(
         self,
         model_name: str,
         version: str = "champion",
-    ) -> Optional[str]:
+        ) -> Optional[str]:
         """Get a specific model version object from registry by name and version or alias."""
         model_ref = self.registry.get_model(model_name)
         mv = model_ref.version("champion")
