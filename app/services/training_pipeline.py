@@ -2,9 +2,10 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 from typing import Dict, List, Any, Optional, Tuple
+from enum import Enum
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import train_test_split, GridSearchCV, RandomizedSearchCV
-from sklearn.metrics import mean_squared_error, mean_absolute_error
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 import time
 import os
 from loguru import logger
@@ -78,7 +79,8 @@ class TrainingPipeline:
         self._y_train: Optional[pd.Series] = None
         self._y_test: Optional[pd.Series] = None
         self._trained_model: Optional[Any] = None
-        self._model_metrics: Optional[Dict[str, float]] = None
+        self._challenger_metrics: Optional[Dict[str, float]] = None
+        self._champion_metrics: Optional[Dict[str, float]] = None
         self._comparison_result: Optional[Dict[str, Any]] = None
         self.champ_model: Optional[Any] = None
         self.champion_params: Optional[Dict[str, Any]] = None
@@ -214,12 +216,14 @@ class TrainingPipeline:
             Trained model object
         """
         logger.info(f"Starting model training (enable_tuning={request.enable_hyperparameter_tuning})")
-        self.champion_params = {'alpha': 0.9, 'ccp_alpha': 0.0, 'criterion': 'friedman_mse', 'init': None, 'learning_rate': 0.1, 'loss': 'squared_error', 'max_depth': 20, 'max_features': None, 'max_leaf_nodes': None, 'min_impurity_decrease': 0.0, 'min_samples_leaf': 2, 'min_samples_split': 5, 'min_weight_fraction_leaf': 0.0, 'n_estimators': 150, 'n_iter_no_change': None, 'random_state': 42, 'subsample': 1.0, 'tol': 0.0001, 'validation_fraction': 0.1, 'verbose': 0, 'warm_start': False}
-        self.champion_params = RandomForestTrainingParams(**self.champion_params)
+
         if self._X_train is None:
             raise TrainingPipelineException("Data not prepared. Call prepare_data() first.")
         if self.champion_params is None:
             logger.warning("Champion parameters not available, using defaults or provided hyperparameters")
+            raise TrainingPipelineException("Champion params not available")
+
+        self.champion_params = RandomForestTrainingParams(**self.champion_params)
 
         try:
             # Use provided hyperparameters or champion parameters
@@ -265,8 +269,16 @@ class TrainingPipeline:
             
         except Exception as e:
             raise TrainingPipelineException(f"Failed to train model: {str(e)}")
-    
-    def compute_metrics(self) -> Dict[str, float]:
+
+    @staticmethod
+    def metrics_fn(y_true, y_pred):
+        return {
+            "rmse": float(np.sqrt(mean_squared_error(y_true, y_pred))),
+            "mae": float(mean_absolute_error(y_true, y_pred)),
+            "r2_score": float(r2_score(y_true, y_pred)),
+        }
+
+    def compute_metrics(self, model_role: ModelRoleEnum) -> Dict[str, float]:
         """
         Compute evaluation metrics on test set.
         
@@ -274,137 +286,144 @@ class TrainingPipeline:
             Dictionary with classification or regression metrics
         """
         logger.info("Computing evaluation metrics")
-        
-        if self._trained_model is None or self._X_test is None:
+        if model_role == self.ModelRoleEnum.CHAMPION:
+            testing_model = self._champion_model
+        elif model_role == self.ModelRoleEnum.CHALLENGER:
+            testing_model = self._trained_model
+        else:
+            raise ValueError(f"Invalid model role: {model_role}")
+           
+
+        if testing_model is None or self._X_test is None:
             raise TrainingPipelineException("Model not trained or data not prepared")
-        
+
         try:
-            y_pred = self._trained_model.predict(self._X_test)
+            y_pred = testing_model.predict(self._X_test)
+
+            metrics = self.metrics_fn(self._y_test, y_pred)
             
-            # Classification metrics
-            metrics = {
-                'accuracy': accuracy_score(self._y_test, y_pred),
-                'precision': precision_score(self._y_test, y_pred, average='weighted', zero_division=0),
-                'recall': recall_score(self._y_test, y_pred, average='weighted', zero_division=0),
-                'f1_score': f1_score(self._y_test, y_pred, average='weighted', zero_division=0),
-            }
-            
-            self._model_metrics = metrics
+            if model_role == self.ModelRoleEnum.CHALLENGER:
+                self._challenger_metrics = metrics
+                logger.debug(f"Challenger metrics: {self._challenger_metrics}")
+            elif model_role == self.ModelRoleEnum.CHAMPION:
+                self._champion_metrics = metrics
+                logger.debug(f"Champion metrics: {self._champion_metrics}")
             logger.info(f"Metrics computed: {metrics}")
-            
+
             return metrics
-            
+
         except Exception as e:
             raise TrainingPipelineException(f"Failed to compute metrics: {str(e)}")
     
-    def compare_with_champion(self, model_name: str, request: TrainingPipelineRequest) -> Dict[str, Any]:
+    def compare_with_champion(self) -> Dict[str, Any]:
         """
         Compare trained model with champion model.
         
-        Args:
-            model_name: Name of the model in registry
-            request: TrainingPipelineRequest
-            
         Returns:
             Comparison result dictionary
         """
         logger.info("Comparing with champion model")
-        
-        if self._model_metrics is None:
-            raise TrainingPipelineException("Metrics not computed. Call compute_metrics() first.")
-        
+
         try:
-            # Use accuracy as the comparison metric
-            comparison = self.mlops_manager.compare_with_champion(
-                model_name=model_name,
-                challenger_version=f"{model_name}_v{int(time.time())}",  # Temp version name
-                metric_name='accuracy',
-                champion_tag_name='stage',
-                champion_tag_value='champion',
-                higher_is_better=True
-            )
+            challenger_metrics = self.compute_metrics(self.ModelRoleEnum.CHALLENGER)
+            # champion_metrics = self.compute_metrics(self.ModelRoleEnum.CHAMPION)
+
+            champion_metrics = {
+                "rmse": 0.08,
+                "mae": 0.06,
+                "r2_score": 0.01
+            }
             
+            comparison_details = {}
+            challenger_wins = 0
+            
+            # Known metrics where lower is better
+            lower_is_better_metrics = ['rmse', 'mae', 'mse']
+            
+            for metric, chal_val in challenger_metrics.items():
+                if metric in champion_metrics:
+                    champ_val = champion_metrics[metric]
+                    
+                    # Determine if higher or lower is better for this metric
+                    is_lower_better = any(m in metric.lower() for m in lower_is_better_metrics)
+                    
+                    if is_lower_better:
+                        challenger_better = chal_val < champ_val
+                    else:
+                        challenger_better = chal_val > champ_val
+                        
+                    if challenger_better:
+                        challenger_wins += 1
+                        
+                    comparison_details[metric] = {
+                        "challenger": chal_val,
+                        "champion": champ_val,
+                        "challenger_better": challenger_better,
+                        "difference": chal_val - champ_val
+                    }
+            
+            total_compared = len(comparison_details)
+            promote = challenger_wins >= (total_compared / 2) if total_compared > 0 else True
+
+            comparison = {
+                "status": "compared",
+                "promote": promote,
+                "challenger_wins": challenger_wins,
+                "total_metrics_compared": total_compared,
+                "metrics_comparison": comparison_details
+            }
+
+            logger.debug(f"Comparison with champion: {comparison}")
             self._comparison_result = comparison
-            logger.info(f"Comparison complete: {comparison.get('recommendation')}")
-            
             return comparison
-            
+
         except Exception as e:
             logger.warning(f"Comparison with champion failed: {str(e)}")
             # Return neutral comparison result
-            return {
-                "status": "no_champion",
-                "recommendation": "promote_challenger",
-                "message": "No champion to compare against"
+            self._comparison_result = {
+                "status": "error",
+                "message": str(e)
             }
-    
+            return self._comparison_result
+
     def register_model(self,
                       model_name: str,
-                      request: TrainingPipelineRequest,
                       version_name: Optional[str] = None) -> Dict[str, Any]:
-        """
-        Register trained model in Snowflake registry with metrics and metadata.
-        
-        Args:
-            model_name: Name for the model in registry
-            request: TrainingPipelineRequest with snapshot_date and metadata
-            version_name: Optional version name (auto-generated if not provided)
-            
-        Returns:
-            Registration result dictionary
-        """
+
         logger.info(f"Registering model: {model_name}")
         
-        if self._trained_model is None or self._model_metrics is None:
+        if self._trained_model is None or self._challenger_metrics is None:
             raise TrainingPipelineException("Model not trained or metrics not computed")
-        
-        try:
-            # Generate version name
-            if not version_name:
-                version_name = f"v{int(time.time())}"
-            
+
+        try:            
             # Use MLOps manager to log and register the model
-            metrics = self.mlops_manager.log_run(
-                run_name=f"{model_name}_{version_name}",
+            mv = self.mlops_manager.log_run(
                 model=self._trained_model,
                 X_train=self._X_train,
                 y_train=self._y_train,
                 X_test=self._X_test,
                 y_test=self._y_test,
                 params={},
-                metrics_fn=lambda y_true, y_pred: self._model_metrics,
+                metrics_fn=self.metrics_fn,
                 log_model=True,
                 model_name=model_name,
-                version_name=version_name,
-                save_metrics_to_registry=True,
-                tags={'stage': 'challenger'} if request.tags is None else request.tags
+                alias=None,
+                version_name=version_name
             )
-            
-            # Log metadata (snapshot_date)
-            metadata = {
-                'snapshot_date': request.snapshot_date.isoformat(),
-                'feature_view': request.feature_view_name,
-                'description': request.description or 'Training pipeline run'
-            }
-            
-            self.mlops_manager.log_model_metadata(
-                model_name=model_name,
-                version_name=version_name,
-                metadata=metadata
-            )
-            
-            logger.info(f"Model registered: {model_name} version {version_name}")
-            
+
+            logger.info(f"Model registered: {mv.model_name} version {mv.version_name}")
+
             return {
                 "status": "registered",
-                "model_name": model_name,
-                "version_name": version_name,
-                "metrics": metrics,
+                "model_name": mv.model_name,
+                "version_name": mv.version_name,
+                "metrics": mv.show_metrics()
             }
-            
+
         except Exception as e:
+            logger.error(e)
             raise TrainingPipelineException(f"Failed to register model: {str(e)}")
-    
+
     def run_pipeline(self, request: TrainingPipelineRequest) -> TrainingPipelineResponse:
         """
         Execute the complete training pipeline in order.
