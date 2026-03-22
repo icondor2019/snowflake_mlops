@@ -13,6 +13,7 @@ from loguru import logger
 from utils.snowflake_mlops import SnowflakeMLOpsManager
 from requests_models.tr_pipeline_request import TrainingPipelineRequest, RandomForestTrainingParams
 from responses.tr_pipeline_response import TrainingPipelineResponse, ModelComparisonResult
+from enums.model_role import ModelRoleEnum
 
 
 class TrainingPipelineException(Exception):
@@ -286,9 +287,9 @@ class TrainingPipeline:
             Dictionary with classification or regression metrics
         """
         logger.info("Computing evaluation metrics")
-        if model_role == self.ModelRoleEnum.CHAMPION:
+        if model_role == ModelRoleEnum.CHAMPION:
             testing_model = self._champion_model
-        elif model_role == self.ModelRoleEnum.CHALLENGER:
+        elif model_role == ModelRoleEnum.CHALLENGER:
             testing_model = self._trained_model
         else:
             raise ValueError(f"Invalid model role: {model_role}")
@@ -302,10 +303,10 @@ class TrainingPipeline:
 
             metrics = self.metrics_fn(self._y_test, y_pred)
             
-            if model_role == self.ModelRoleEnum.CHALLENGER:
+            if model_role == ModelRoleEnum.CHALLENGER:
                 self._challenger_metrics = metrics
                 logger.debug(f"Challenger metrics: {self._challenger_metrics}")
-            elif model_role == self.ModelRoleEnum.CHAMPION:
+            elif model_role == ModelRoleEnum.CHAMPION:
                 self._champion_metrics = metrics
                 logger.debug(f"Champion metrics: {self._champion_metrics}")
             logger.info(f"Metrics computed: {metrics}")
@@ -325,8 +326,8 @@ class TrainingPipeline:
         logger.info("Comparing with champion model")
 
         try:
-            challenger_metrics = self.compute_metrics(self.ModelRoleEnum.CHALLENGER)
-            # champion_metrics = self.compute_metrics(self.ModelRoleEnum.CHAMPION)
+            challenger_metrics = self.compute_metrics(ModelRoleEnum.CHALLENGER)
+            # champion_metrics = self.compute_metrics(ModelRoleEnum.CHAMPION)
 
             champion_metrics = {
                 "rmse": 0.08,
