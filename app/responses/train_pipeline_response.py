@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
+import uuid
 
 
 class ModelComparisonResult(BaseModel):
@@ -73,3 +74,50 @@ class TrainingPipelineResponse(BaseModel):
                 "timestamp": "2026-03-04T10:30:15"
             }
         }
+
+
+class ModelTrainingLog(BaseModel):
+    uuid: str = Field(
+        default_factory=lambda: str(uuid.uuid4()), 
+        description="UUID string representing the training run"
+    )
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="Timestamp of the run"
+    )
+    model_name: str = Field(
+        ..., 
+        description="Name of the model"
+    )
+    version_name: str = Field(
+        ..., 
+        description="Version name of the trained model"
+    )
+    metrics: Dict[str, Any] = Field(
+        ..., 
+        description="Metrics of the trained version"
+    )
+    training_parameters: Dict[str, Any] = Field(
+        ..., 
+        description="Parameters used for training"
+    )
+    champion_version_name: Optional[str] = Field(
+        default='champion', 
+        description="Version name of the champion model"
+    )
+    champion_metrics: Optional[Dict[str, Any]] = Field(
+        default=None, 
+        description="Metrics of the champion version"
+    )
+    comparison_metrics: Optional[Dict[str, Any]] = Field(
+        default=None, 
+        description="JSON dictionary with comparison details"
+    )
+    potential_challenger_promoted: bool = Field(
+        default=False, 
+        description="Whether the training run model was promoted to champion"
+    )
+    comment: Optional[str] = Field(
+        default=None, 
+        description="Optional comment regarding the run"
+    )
