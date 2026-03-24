@@ -1,10 +1,12 @@
 import os
 import json
+import traceback
 import numpy as np
 import pandas as pd
 from loguru import logger
 from typing import Dict, List, Any, Optional, Tuple
 
+from requests import session
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
@@ -428,7 +430,8 @@ class TrainingPipeline:
             logger.error(e)
             raise TrainingPipelineException(f"Failed to register model: {str(e)}")
 
-    def save_training_log(self, model_registered_data: Dict[str, Any], 
+    def save_training_log(self, 
+                          model_registered_data: Dict[str, Any], 
                           comment: Optional[str] = None) -> Any:
         """
         Save training logs to Snowflake table model_training_log.
@@ -471,3 +474,35 @@ class TrainingPipeline:
         except Exception as e:
             logger.error(f"Failed to save training log: {str(e)}")
             raise TrainingPipelineException(f"Failed to save training log: {str(e)}")
+
+    def run_pipeline(self) -> Dict[str, Any]:                               
+        try:
+            # Step 1: Get features
+            self.get_features()
+            logger.info(f"Features retrieved successfully {self._features_df.shape[0]} rows")
+
+            # # # Step 2: Get champion model
+            self.get_champion_model()
+
+            # # # Step 3: Prepare data
+            X_train, X_test, y_train, y_test = self.prepare_data()
+
+            # # # Step 4: Train model
+            self.train_model()
+
+            # # Step 5: Compute metrics
+            comparison_results = self.compare_with_champion()
+    
+            # # Step 6: Compare with champion
+            register_record = self.register_model()
+
+            # Step 7: Log training details
+            log_entry = self.save_training_log(
+                model_registered_data=register_record,
+                comment = "weekly scheduled training run"
+            )
+            self.session.close()
+
+        except Exception as e:
+            logger.error(f"Error: {e}")
+            traceback.print_exc()
